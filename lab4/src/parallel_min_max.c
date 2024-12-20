@@ -16,11 +16,22 @@
 #include "utils.h"
 
 #define BUFFER_SIZE 256
+int pnum = -1;
+pid_t *child_pids;
+
+void handle_alarm(int sig) {
+    printf("Timeout reached! Terminating all child processes...\n");
+    for (int i = 0; i < pnum; i++) {
+        if (child_pids[i] > 0) {
+            kill(child_pids[i], SIGKILL); 
+        }
+    }
+    exit(1);
+}
 
 int main(int argc, char **argv) {
     int seed = -1;
     int array_size = -1;
-    int pnum = -1;
     int timeout = -1;
     bool with_files = false;
 
@@ -67,6 +78,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    child_pids = malloc(sizeof(pid_t) * pnum);
     int *array = malloc(sizeof(int) * array_size);
     GenerateArray(array, array_size, seed);
     int active_child_processes = 0;
@@ -75,6 +87,11 @@ int main(int argc, char **argv) {
     gettimeofday(&start_time, NULL);
 
     int pipes[pnum][2]; // Create pipes for each child process
+
+    if (timeout > 0) {
+        signal(SIGALRM, handle_alarm);
+        alarm(timeout);
+    }
 
     for (int i = 0; i < pnum; i++) {
         if (with_files && i % 2 == 0) {
@@ -99,7 +116,7 @@ int main(int argc, char **argv) {
         if (child_pid >= 0) {
             // successful fork
             active_child_processes += 1;
-
+            child_pids[i] = child_pid;
             if (child_pid == 0) { // Child process
                 if (with_files) {
                     // File handling logic
@@ -168,11 +185,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    while (active_child_processes > 0) {
-        wait(NULL); // Wait for any child process to finish
-        active_child_processes -= 1;
-    }
-
     struct MinMax min_max;
     min_max.min = INT_MAX;
     min_max.max = INT_MIN;
@@ -217,19 +229,14 @@ int main(int argc, char **argv) {
     struct timeval finish_time;
     gettimeofday(&finish_time, NULL);
 
-    if (timeout > 0) {
-        sleep(timeout);
-        for (int i = 0; i < pnum; i++) {
-            kill(-getpid(), SIGKILL);
-        }
-    }
-
     while (wait(NULL) > 0);
+    alarm(0);
 
     double elapsed_time = (finish_time.tv_sec - start_time.tv_sec) * 1000.0;
     elapsed_time += (finish_time.tv_usec - start_time.tv_usec) / 1000.0;
 
     free(array);
+    free(child_pids);
 
     printf("Min: %d\n", min_max.min);
     printf("Max: %d\n", min_max.max);
