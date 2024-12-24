@@ -1,30 +1,25 @@
-#include "socket_utils.h" 
+#include "socket_utils.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <inttypes.h>
-#include <errno.h>      
+#include <errno.h>
+#include <getopt.h>
 #include <unistd.h>
-#include <getopt.h> 
 
 struct Server {
     char ip[255];
     int port;
 };
 
-uint64_t MultModulo(uint64_t a, uint64_t b, uint64_t mod) {
-    uint64_t result = 0;
-    a = a % mod;
-    while (b > 0) {
-        if (b % 2 == 1)
-            result = (result + a) % mod;
-        a = (a * 2) % mod;
-        b /= 2;
-    }
-    return result % mod;
-}
+struct Task {
+    struct Server server;
+    uint64_t begin;
+    uint64_t end;
+    uint64_t mod;
+};
 
 bool ConvertStringToUI64(const char *str, uint64_t *val) {
     char *end = NULL;
@@ -41,42 +36,48 @@ bool ConvertStringToUI64(const char *str, uint64_t *val) {
 }
 
 void *connectToServer(void *arg) {
-    struct Server *server = (struct Server *)arg;
+    struct Task *task = (struct Task *)arg;
 
-    int sck = connect_to_server(server->ip, server->port); 
+    int sck = connect_to_server(task->server.ip, task->server.port);
 
-    uint64_t begin = 1; 
-    uint64_t end = 100; 
-    uint64_t mod = 1000;
+    uint64_t begin = htonll(task->begin);
+    uint64_t end = htonll(task->end);
+    uint64_t mod = htonll(task->mod);
 
-    char task[sizeof(uint64_t) * 3];
-    memcpy(task, &begin, sizeof(uint64_t));
-    memcpy(task + sizeof(uint64_t), &end, sizeof(uint64_t));
-    memcpy(task + 2 * sizeof(uint64_t), &mod, sizeof(uint64_t));
+    char task_data[sizeof(uint64_t) * 3];
+    memcpy(task_data, &begin, sizeof(uint64_t));
+    memcpy(task_data + sizeof(uint64_t), &end, sizeof(uint64_t));
+    memcpy(task_data + 2 * sizeof(uint64_t), &mod, sizeof(uint64_t));
 
-    send_data(sck, task, sizeof(task));
+    if (send_data(sck, task_data, sizeof(task_data)) == -1) {
+        perror("Send failed");
+        close(sck);
+        return NULL;
+    }
 
     char response[sizeof(uint64_t)];
-    receive_data(sck, response, sizeof(response)); 
+    if (receive_data(sck, response, sizeof(response)) == -1) {
+        perror("Receive failed");
+        close(sck);
+        return NULL;
+    }
 
-    uint64_t answer = 0;
-    memcpy(&answer, response, sizeof(uint64_t));
-    
-    printf("Result from server %s:%d: %" PRIu64 "\n", server->ip, server->port, answer); // Use PRIu64
+    uint64_t answer = ntohll(*((uint64_t *)response));
 
-    close(sck);    
+    close(sck);
+
+    printf("Received answer: %" PRIu64 " from server %s:%d\n", answer, task->server.ip, task->server.port);
+    return (void *)(uintptr_t)answer;
 }
 
 int main(int argc, char **argv) {
     uint64_t k = -1;
     uint64_t mod = -1;
 
-    struct Server servers[10]; 
+    struct Server servers[10];
     int servers_num = 0;
 
     while (true) {
-        int current_optind = optind ? optind : 1;
-
         static struct option options[] = {{"k", required_argument, 0, 0},
                                            {"mod", required_argument, 0, 0},
                                            {"servers", required_argument, 0, 0},
@@ -100,8 +101,11 @@ int main(int argc, char **argv) {
                     case 2:
                         {
                             FILE *file = fopen(optarg, "r");
-                            while (fscanf(file, "%s %d", servers[servers_num].ip,
-                                          &servers[servers_num].port) != EOF && servers_num < 10) {
+                            if (!file) {
+                                perror("Failed to open servers list file");
+                                return EXIT_FAILURE;
+                            }
+                            while (fscanf(file, "%s %d", servers[servers_num].ip, &servers[servers_num].port) == 2 && servers_num < 10) {
                                 servers_num++;
                             }
                             fclose(file);
@@ -122,22 +126,45 @@ int main(int argc, char **argv) {
     }
 
     if (k == -1 || mod == -1 || servers_num == 0) {
-        fprintf(stderr,
-                "Usage: %s --k <factorial> --mod <modulus> --servers /path/to/file\n",
-                argv[0]);
+        fprintf(stderr, "Usage: %s --k <factorial> --mod <modulus> --servers /path/to/file\n", argv[0]);
         return EXIT_FAILURE;
     }
 
+    struct Task tasks[servers_num];
+    uint64_t chunk_size = k / servers_num;
+    uint64_t remainder = k % servers_num;
+    uint64_t begin = 1;
+
+    for (int i = 0; i < servers_num; i++) {
+        tasks[i].server = servers[i];
+        tasks[i].begin = begin;
+        tasks[i].end = begin + chunk_size - 1;
+        if (i < remainder)
+            tasks[i].end++;
+        tasks[i].mod = mod;
+        begin = tasks[i].end + 1;
+    }
+
     pthread_t threads[servers_num];
+    uint64_t total_result = 1;
 
     for (int i = 0; i < servers_num; i++) {
-        pthread_create(&threads[i], NULL, connectToServer,
-                       (void *)&servers[i]);
+        if (pthread_create(&threads[i], NULL, connectToServer, (void *)&tasks[i]) != 0) {
+            perror("Failed to create thread");
+            return EXIT_FAILURE;
+        }
     }
 
     for (int i = 0; i < servers_num; i++) {
-        pthread_join(threads[i], NULL);
+        void *result_ptr;
+        if (pthread_join(threads[i], &result_ptr) != 0) {
+            perror("Failed to join thread");
+            return EXIT_FAILURE;
+        }
+        uint64_t answer = (uint64_t)(uintptr_t)result_ptr;
+        total_result = (total_result * answer) % mod;
     }
 
+    printf("Total result from all servers: %" PRIu64 "\n", total_result);
     return EXIT_SUCCESS;
 }
