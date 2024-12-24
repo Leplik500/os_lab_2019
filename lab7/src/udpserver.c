@@ -4,20 +4,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SERV_PORT 20001
-#define BUFSIZE 1024
 #define SADDR struct sockaddr
 #define SLEN sizeof(struct sockaddr_in)
 
-int main() {
+int main(int argc, char *argv[]) {
+  if (argc < 3) {
+    printf("Usage: %s <PORT> <BUFSIZE>\n", argv[0]);
+    exit(1);
+  }
+
+  int SERV_PORT = atoi(argv[1]);
+  int BUFSIZE = atoi(argv[2]);
   int sockfd, n;
-  char mesg[BUFSIZE], ipadr[16];
+  char *mesg = malloc(BUFSIZE);
+  char ipadr[16];
   struct sockaddr_in servaddr;
   struct sockaddr_in cliaddr;
+
+  if (mesg == NULL) {
+    perror("malloc");
+    exit(1);
+  }
 
   if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
     perror("socket problem");
@@ -33,6 +43,7 @@ int main() {
     perror("bind problem");
     exit(1);
   }
+
   printf("SERVER starts...\n");
 
   while (1) {
@@ -42,6 +53,7 @@ int main() {
       perror("recvfrom");
       exit(1);
     }
+
     mesg[n] = 0;
 
     printf("REQUEST %s      FROM %s : %d\n", mesg,
@@ -53,4 +65,6 @@ int main() {
       exit(1);
     }
   }
+
+  free(mesg);
 }
